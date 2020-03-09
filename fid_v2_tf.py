@@ -1,6 +1,6 @@
 # Code from https://github.com/bioinf-jku/TTUR
 # !/usr/bin/env python3
-''' Calculates the Frechet Inception Distance (FID) to evalulate GANs.
+""" Calculates the Frechet Inception Distance (FID) to evaluate GANs.
 
 The FID metric calculates the distance between two distributions of images.
 Typically, we have summary statistics (mean & covariance matrix) of one
@@ -12,10 +12,10 @@ distribution given by summary statistics (in pickle format).
 
 The FID is calculated by assuming that X_1 and X_2 are the activations of
 the pool_3 layer of the inception net for generated samples and real world
-samples respectivly.
+samples respectively.
 
 See --help to see further details.
-'''
+"""
 
 from __future__ import absolute_import, division, print_function
 import numpy as np
@@ -253,7 +253,6 @@ def fid_score(create_session, data, samples):
         m2, s2 = calculate_activation_statistics(samples, sess)
         fid_value = calculate_frechet_distance(m1, s1, m2, s2)
         return fid_value
-
 
 
 def get_fid_score(data_path, inception_path=None, gpu='0'):
