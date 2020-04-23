@@ -1,22 +1,21 @@
-import os
-import random
-
-import shutil
-import datetime
-import logging
-import sys
 import argparse
+import os
 
 import numpy as np
 
 import torch
-from torch.autograd import Variable
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as fn
 import torch.optim as optim
-from torchvision import datasets, transforms
-import torchvision.utils as vutils
 import torch.utils.data
+import torchvision.utils as vutils
+from torch.autograd import Variable
+from torchvision import datasets, transforms
+from .model import _netE, _netG, _netI
+from .utils import train_flag, weights_init, compute_energy, stats_headings, \
+                   reparametrize, diag_normal_NLL, create_lazy_session, \
+                   get_exp_id, get_output_dir, setup_logging, copy_source, \
+                   set_gpu, set_cudnn, set_seed, output_paths, update_status
 
 
 def get_args(exp_id):
@@ -77,16 +76,7 @@ def get_args(exp_id):
 def train(device, args, output_dir, logger):
 
     # output
-    outf_recon = output_dir + '/recon'
-    outf_syn = output_dir + '/syn'
-    outf_test = output_dir + '/test'
-    outf_ckpt = output_dir + '/ckpt'
-
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(outf_recon, exist_ok=True)
-    os.makedirs(outf_syn, exist_ok=True)
-    os.makedirs(outf_test, exist_ok=True)
-    os.makedirs(outf_ckpt, exist_ok=True)
+    output_paths(output_dir)
 
     # data
     dataset = datasets.CIFAR10(root=args.dataroot, download=True,
@@ -100,102 +90,10 @@ def train(device, args, output_dir, logger):
     unnormalize = lambda img: img / 2.0 + 0.5
 
     # params
-    nz = int(args.nz)
-    nez = int(args.nez)
-    ngf = int(args.ngf)
-    ndf = int(args.ndf)
-    nif = int(args.nif)
-    nc = int(args.nc)
-
-    # tensorflow
-    def create_lazy_session():
-        import tensorflow as tf
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        config.gpu_options.per_process_gpu_memory_fraction = 0.5
-        return tf.Session(config=config)
+    nz, nez, ngf, ndf, nif, nc = int(args.nz), int(args.nez), int(args.ngf), int(args.ndf), int(args.nif), int(args.nc)
 
     import inception_score_v2_tf as is_v2
     import fid_v2_tf as fid_v2
-
-    # models
-    def weights_init(m):
-        classname = m.__class__.__name__
-        if classname.find('Conv') != -1:
-            m.weight.data.normal_(0.0, 0.02)
-        elif classname.find('BatchNorm') != -1:
-            m.weight.data.normal_(1.0, 0.02)
-            m.bias.data.fill_(0)
-
-    def train_flag():
-        netG.train()
-        netI.train()
-        netE.train()
-
-    class _netG(nn.Module):
-        def __init__(self, nz, nc, ngf):
-            super(_netG, self).__init__()
-
-            self.deconv1 = nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False)
-            self.deconv1_bn = nn.BatchNorm2d(ngf * 8)
-
-            self.deconv2 = nn.ConvTranspose2d(ngf * 8, ngf * 8, 4, 2, 1, bias=False)
-            self.deconv2_bn = nn.BatchNorm2d(ngf * 8)
-
-            self.deconv3 = nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False)
-            self.deconv3_bn = nn.BatchNorm2d(ngf * 4)
-
-            self.deconv4 = nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False)
-            self.deconv4_bn = nn.BatchNorm2d(ngf * 2)
-
-            self.deconv5 = nn.ConvTranspose2d(ngf * 2, nc, 3, 1, 1)
-
-        def forward(self, input):
-            oG_l1 = F.relu(self.deconv1_bn(self.deconv1(input)))
-            oG_l2 = F.relu(self.deconv2_bn(self.deconv2(oG_l1)))
-            oG_l3 = F.relu(self.deconv3_bn(self.deconv3(oG_l2)))
-            oG_l4 = F.relu(self.deconv4_bn(self.deconv4(oG_l3)))
-            oG_out = torch.tanh(self.deconv5(oG_l4))
-            return oG_out
-
-    class _netE(nn.Module):
-        def __init__(self, nc, nez, ndf):
-            super(_netE, self).__init__()
-
-            self.conv1 = nn.Conv2d(nc, ndf, 3, 1, 1, bias=False)
-            self.conv2 = nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False)
-            self.conv3 = nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False)
-            self.conv4 = nn.Conv2d(ndf * 4, ndf * 4, 4, 2, 1, bias=False)
-            self.conv5 = nn.Conv2d(ndf * 4, nez, 4, 1, 0)
-
-        def forward(self, input):
-            oE_l1 = F.leaky_relu(self.conv1(input), 0.2)
-            oE_l2 = F.leaky_relu(self.conv2(oE_l1), 0.2)
-            oE_l3 = F.leaky_relu(self.conv3(oE_l2), 0.2)
-            oE_l4 = F.leaky_relu(self.conv4(oE_l3), 0.2)
-            oE_out = self.conv5(oE_l4)
-            return oE_out
-
-    class _netI(nn.Module):
-        def __init__(self, nc, nz, nif):
-            super(_netI, self).__init__()
-
-            self.conv1 = nn.Conv2d(nc, nif, 3, 1, 1, bias=False)
-            self.conv2 = nn.Conv2d(nif, nif * 2, 4, 2, 1, bias=False)
-            self.conv3 = nn.Conv2d(nif * 2, nif * 4, 4, 2, 1, bias=False)
-            self.conv4 = nn.Conv2d(nif * 4, nif * 8, 4, 2, 1, bias=False)
-            self.conv51 = nn.Conv2d(nif * 8, nz, 4, 1, 0)  # for mu
-            self.conv52 = nn.Conv2d(nif * 8, nz, 4, 1, 0)  # for log_sigma
-
-        def forward(self, input):
-            oI_l1 = F.leaky_relu(self.conv1(input), 0.2)
-            oI_l2 = F.leaky_relu(self.conv2(oI_l1), 0.2)
-            oI_l3 = F.leaky_relu(self.conv3(oI_l2), 0.2)
-            oI_l4 = F.leaky_relu(self.conv4(oI_l3), 0.2)
-
-            oI_mu = self.conv51(oI_l4)
-            oI_log_sigma = self.conv52(oI_l4)
-            return oI_mu, oI_log_sigma
 
     netG = _netG(nz, nc, ndf).to(device)
     netG.apply(weights_init)
@@ -218,33 +116,6 @@ def train(device, args, output_dir, logger):
     fixed_noiseV = Variable(fixed_noise)
     mse_loss = nn.MSELoss(reduction='sum').to(device)
 
-    def compute_energy(disc_score):
-        if args.energy_form == 'tanh':
-            energy = torch.tanh(-disc_score.squeeze())
-        elif args.energy_form == 'sigmoid':
-            energy = F.sigmoid(-disc_score.squeeze())
-        elif args.energy_form == 'identity':
-            energy = disc_score.squeeze()
-        elif args.energy_form == 'softplus':
-            energy = F.softplus(-disc_score.squeeze())
-        return energy
-
-    def diag_normal_NLL(z, z_mu, z_log_sigma):
-        # define the Negative Log Probability of Normal which has diagonal cov
-        # input: [batch nz, 1, 1] squeeze it to batch nz
-        # return: shape is [batch]
-        nll = 0.5 * torch.sum(z_log_sigma.squeeze(), dim=1) + \
-              0.5 * torch.sum((torch.mul(z - z_mu, z - z_mu) / (1e-6 + torch.exp(z_log_sigma))).squeeze(), dim=1)
-        return nll.squeeze()
-
-    def reparametrize(mu, log_sigma, is_train=True):
-        if is_train:
-            std = torch.exp(log_sigma.mul(0.5))
-            eps = Variable(std.data.new(std.size()).normal_())
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-
     optimizerE = optim.Adam(netE.parameters(), lr=args.e_lr, betas=(args.beta1, 0.999), weight_decay=args.e_decay)
     optimizerG = optim.Adam(netG.parameters(), lr=args.g_lr, betas=(args.beta1, 0.999), weight_decay=args.g_decay)
     optimizerI = optim.Adam(netI.parameters(), lr=args.i_lr, betas=(args.beta1, 0.999), weight_decay=args.i_decay)
@@ -252,22 +123,6 @@ def train(device, args, output_dir, logger):
     lrE_schedule = optim.lr_scheduler.ExponentialLR(optimizerE, args.e_gamma)
     lrG_schedule = optim.lr_scheduler.ExponentialLR(optimizerG, args.g_gamma)
     lrI_schedule = optim.lr_scheduler.ExponentialLR(optimizerI, args.i_gamma)
-
-    stats_headings = [['epoch', '{:>14}', '{:>14d}'],
-                      ['errRecon', '{:>14}', '{:>14.3f}'],
-                      ['errLatent', '{:>14}', '{:>14.3f}'],
-                      ['E_T', '{:>14}', '{:>14.3f}'],
-                      ['E_F', '{:>14}', '{:>14.3f}'],
-                      ['err(I)', '{:>14}', '{:>14.3f}'],
-                      ['err(G)', '{:>14}', '{:>14.3f}'],
-                      ['err(E)', '{:>14}', '{:>14.3f}'],
-                      ['KLD(z)', '{:>14}', '{:>14.3f}'],
-                      ['lr(E)', '{:>14}', '{:>14.6f}'],
-                      ['lr(G)', '{:>14}', '{:>14.6f}'],
-                      ['lr(I)', '{:>14}', '{:>14.6f}'],
-                      ['inc_v2', '{:>14}', '{:>14.3f}'],
-                      ['fid_v2', '{:>14}', '{:>14.3f}'],
-                      ]
 
     logger.info(' ')
     logger.info(''.join([h[1] for h in stats_headings]).format(*[h[0] for h in stats_headings]))
@@ -290,7 +145,7 @@ def train(device, args, output_dir, logger):
         num_batch = len(dataloader.dataset) / args.batchSize
         for i, data in enumerate(dataloader, 0):
 
-            train_flag()
+            train_flag(netG, netE, netI)
 
             """
             Train EBM 
@@ -301,14 +156,16 @@ def train(device, args, output_dir, logger):
             batch_size = real_cpu.size(0)
             input.resize_as_(real_cpu).copy_(real_cpu)
             inputV = Variable(input)
+            
             disc_score_T = netE(inputV)
-            Eng_T = compute_energy(disc_score_T)
+            Eng_T = compute_energy(args, disc_score_T)
             E_T = torch.mean(Eng_T)
+            
             noise.resize_(batch_size, nz, 1, 1).normal_()  # or Uniform
             noiseV = Variable(noise)
             samples = netG(noiseV)
             disc_score_F = netE(samples.detach())
-            Eng_F = compute_energy(disc_score_F)
+            Eng_F = compute_energy(args, disc_score_F)
             E_F = torch.mean(Eng_F)
             errE = E_T - E_F
             errE.backward()
@@ -359,7 +216,7 @@ def train(device, args, output_dir, logger):
 
             # part2: (b): fool discriminator
             disc_score_F = netE(samples)
-            Eng_F = compute_energy(disc_score_F)
+            Eng_F = compute_energy(args, disc_score_F)
             E_F = torch.mean(Eng_F)
 
             # part2: (a) : reconstruct the latent space
@@ -372,14 +229,7 @@ def train(device, args, output_dir, logger):
                 torch.nn.utils.clip_grad_norm_(netG.parameters(), args.max_normG)
             optimizerG.step()
 
-            stats_values['errRecon'] += errRecon.data.item() / num_batch
-            stats_values['errLatent'] += errLatent.data.item() / num_batch
-            stats_values['E_T'] += E_T.data.item() / num_batch
-            stats_values['E_F'] += E_F.data.item() / num_batch
-            stats_values['err(I)'] += errI.data.item() / num_batch
-            stats_values['err(G)'] += errG.data.item() / num_batch
-            stats_values['err(E)'] += errE.data.item() / num_batch
-            stats_values['KLD(z)'] += errKld.data.item() / num_batch
+        update_status(errRecon, errLatent, E_T, E_F, errI, errG, errE, errKld, num_batch)
 
         # images
         if epoch % 10 == 0 or epoch == (args.niter - 1):
@@ -436,57 +286,6 @@ def train(device, args, output_dir, logger):
     logger.info('done')
 
 
-def set_seed(seed):
-    assert seed
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def set_gpu(device):
-    torch.cuda.set_device(device)
-
-
-def set_cudnn():
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
-
-
-def copy_source(file, output_dir):
-    shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
-
-
-def setup_logging(name='main', output_dir='.', console=True):
-    log_format = logging.Formatter("%(asctime)s : %(message)s")
-    logger = logging.getLogger(name)
-    logger.handlers = []
-    output_file = os.path.join(output_dir, 'output.log')
-    file_handler = logging.FileHandler(output_file)
-    file_handler.setFormatter(log_format)
-    logger.addHandler(file_handler)
-    if console:
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(log_format)
-        logger.addHandler(console_handler)
-    logger.setLevel(logging.INFO)
-    return logger
-
-
-def get_output_dir(exp_id):
-    t = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-    output_dir = os.path.join('output/' + exp_id, t)
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
-
-
-def get_exp_id():
-    return os.path.splitext(os.path.basename(__file__))[0]
-
-
 def main():
     # preamble
     exp_id = get_exp_id()
@@ -504,7 +303,6 @@ def main():
 
     # go
     train(device, args, output_dir, logger)
-
 
 if __name__ == '__main__':
     main()
