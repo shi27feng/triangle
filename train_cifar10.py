@@ -168,6 +168,7 @@ def train(device, args, output_dir, logger):
             Eng_F = compute_energy(args, disc_score_F)
             E_F = torch.mean(Eng_F)
             errE = E_T - E_F
+
             errE.backward()
             if args.is_grad_clampE:
                 torch.nn.utils.clip_grad_norm_(netE.parameters(), args.max_normE)
