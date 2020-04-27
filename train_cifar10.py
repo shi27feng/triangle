@@ -13,9 +13,9 @@ from torch.autograd import Variable
 from torchvision import datasets, transforms
 from .model import _netE, _netG, _netI
 from .utils import train_flag, weights_init, compute_energy, stats_headings, \
-                   reparametrize, diag_normal_NLL, create_lazy_session, \
-                   get_exp_id, get_output_dir, setup_logging, copy_source, \
-                   set_gpu, set_cudnn, set_seed, output_paths, update_status
+    reparametrize, diag_normal_NLL, create_lazy_session, \
+    get_exp_id, get_output_dir, setup_logging, copy_source, \
+    set_gpu, set_cudnn, set_seed, output_paths, update_status
 
 
 def get_args(exp_id):
@@ -74,7 +74,6 @@ def get_args(exp_id):
 
 
 def train(device, args, output_dir, logger):
-
     # output
     output_paths(output_dir)
 
@@ -85,7 +84,8 @@ def train(device, args, output_dir, logger):
                                    transforms.ToTensor(),
                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                                ]))
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batchSize, shuffle=True, num_workers=int(args.workers))
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batchSize, shuffle=True,
+                                             num_workers=int(args.workers))
     dataset_full = np.array([x[0].cpu().numpy() for x in iter(dataset)])
     unnormalize = lambda img: img / 2.0 + 0.5
 
@@ -156,11 +156,11 @@ def train(device, args, output_dir, logger):
             batch_size = real_cpu.size(0)
             input.resize_as_(real_cpu).copy_(real_cpu)
             inputV = Variable(input)
-            
+
             disc_score_T = netE(inputV)
             Eng_T = compute_energy(args, disc_score_T)
             E_T = torch.mean(Eng_T)
-            
+
             noise.resize_(batch_size, nz, 1, 1).normal_()  # or Uniform
             noiseV = Variable(noise)
             samples = netG(noiseV)
@@ -188,7 +188,8 @@ def train(device, args, output_dir, logger):
             z_input = reparametrize(infer_z_mu_true, infer_z_log_sigma_true)
             inputV_recon = netG(z_input)
             errRecon = mse_loss(inputV_recon, inputV) / batch_size
-            errKld = -0.5 * torch.mean(1 + infer_z_log_sigma_true - infer_z_mu_true.pow(2) - infer_z_log_sigma_true.exp())
+            errKld = -0.5 * torch.mean(
+                1 + infer_z_log_sigma_true - infer_z_mu_true.pow(2) - infer_z_log_sigma_true.exp())
 
             # part 3: reconstruction on latent z based on the generated data
             infer_z_mu_gen, infer_z_log_sigma_gen = netI(samples.detach())
@@ -235,15 +236,18 @@ def train(device, args, output_dir, logger):
         # images
         if epoch % 10 == 0 or epoch == (args.niter - 1):
             gen_samples = netG(fixed_noiseV)
-            vutils.save_image(gen_samples.data, '%s/epoch_%03d_samples.png' % (outf_syn, epoch), normalize=True, nrow=10)
+            vutils.save_image(gen_samples.data, '%s/epoch_%03d_samples.png' % (outf_syn, epoch), normalize=True,
+                              nrow=10)
 
             infer_z_mu_input, _ = netI(inputV)
             recon_input = netG(infer_z_mu_input)
-            vutils.save_image(recon_input.data, '%s/epoch_%03d_reconstruct_input.png' % (outf_recon, epoch), normalize=True, nrow=10)
+            vutils.save_image(recon_input.data, '%s/epoch_%03d_reconstruct_input.png' % (outf_recon, epoch),
+                              normalize=True, nrow=10)
 
             infer_z_mu_sample, _ = netI(gen_samples)
             recon_sample = netG(infer_z_mu_sample)
-            vutils.save_image(recon_sample.data, '%s/epoch_%03d_reconstruct_samples.png' % (outf_syn, epoch), normalize=True, nrow=10)
+            vutils.save_image(recon_sample.data, '%s/epoch_%03d_reconstruct_samples.png' % (outf_syn, epoch),
+                              normalize=True, nrow=10)
 
             # interpolation
             between_input_list = [inputV[0].data.cpu().numpy()[np.newaxis, ...]]
@@ -256,7 +260,8 @@ def train(device, args, output_dir, logger):
                 between_input_list.append(recon_between.data.cpu().numpy())
             between_input_list.append(inputV[1].data.cpu().numpy()[np.newaxis, ...])
             between_canvas_np = np.concatenate(between_input_list, axis=0)
-            vutils.save_image(torch.from_numpy(between_canvas_np), '%s/epoch_%03d_interpolate.png' % (outf_syn, epoch), normalize=True, nrow=10, padding=5)
+            vutils.save_image(torch.from_numpy(between_canvas_np), '%s/epoch_%03d_interpolate.png' % (outf_syn, epoch),
+                              normalize=True, nrow=10, padding=5)
 
         # metrics
         if epoch > 0 and (epoch % 50 == 0 or epoch == (args.niter - 1)):
@@ -272,7 +277,8 @@ def train(device, args, output_dir, logger):
             gen_samples_list = [gen_samples_np[i, :, :, :] for i in range(num_samples)]
 
             is_v2_score = is_v2.inception_score(create_lazy_session, gen_samples_list, resize=True, splits=1)[0]
-            fid_v2_score = fid_v2.fid_score(create_lazy_session, 255 * to_nhwc(unnormalize(dataset_full)), gen_samples_np)
+            fid_v2_score = fid_v2.fid_score(create_lazy_session, 255 * to_nhwc(unnormalize(dataset_full)),
+                                            gen_samples_np)
 
         # stats
         stats_values['inc_v2'] = is_v2_score
@@ -305,7 +311,6 @@ def main():
     # go
     train(device, args, output_dir, logger)
 
+
 if __name__ == '__main__':
     main()
-
-
