@@ -4,6 +4,7 @@ import torch.nn.functional as fn
 from torch.autograd import Variable
 import os
 import random
+import numpy as np
 
 import shutil
 import datetime
@@ -144,6 +145,7 @@ def output_paths(output_dir):
     os.makedirs(outf_syn, exist_ok=True)
     os.makedirs(outf_test, exist_ok=True)
     os.makedirs(outf_ckpt, exist_ok=True)
+    return outf_recon, outf_syn, outf_test, outf_ckpt
 
 
 def update_status(errRecon, errLatent, E_T, E_F, errI, errG, errE, errKld, num_batch):

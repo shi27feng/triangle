@@ -75,7 +75,7 @@ def get_args(exp_id):
 
 def train(device, args, output_dir, logger):
     # output
-    output_paths(output_dir)
+    outf_recon, outf_syn, outf_test, outf_ckpt = output_paths(output_dir)
 
     # data
     dataset = datasets.CIFAR10(root=args.dataroot, download=True,
