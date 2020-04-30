@@ -13,7 +13,7 @@ from torch.autograd import Variable
 from torchvision import datasets, transforms
 from .model import _netE, _netG, _netI
 from .utils import train_flag, weights_init, compute_energy, stats_headings, \
-    reparametrize, diag_normal_NLL, create_lazy_session, \
+    reparametrize, diag_normal_neg_log_prb, create_lazy_session, \
     get_exp_id, get_output_dir, setup_logging, copy_source, \
     set_gpu, set_cudnn, set_seed, output_paths, update_status
 
@@ -113,7 +113,7 @@ def train(device, args, output_dir, logger):
     input = torch.FloatTensor(args.batchSize, nc, args.imageSize, args.imageSize).to(device)
     noise = torch.FloatTensor(args.batchSize, nz, 1, 1).to(device)
     fixed_noise = torch.FloatTensor(args.batchSize, nz, 1, 1).normal_().to(device)
-    fixed_noiseV = Variable(fixed_noise)
+    fixed_noise_var = Variable(fixed_noise)
     mse_loss = nn.MSELoss(reduction='sum').to(device)
 
     optimizerE = optim.Adam(netE.parameters(), lr=args.e_lr, betas=(args.beta1, 0.999), weight_decay=args.e_decay)
@@ -155,17 +155,17 @@ def train(device, args, output_dir, logger):
             real_cpu = real_cpu.to(device)
             batch_size = real_cpu.size(0)
             input.resize_as_(real_cpu).copy_(real_cpu)
-            inputV = Variable(input)
+            input_var = Variable(input)
 
-            disc_score_T = netE(inputV)
-            Eng_T = compute_energy(args, disc_score_T)
+            disc_score_true = netE(input_var)
+            Eng_T = compute_energy(args, disc_score_true)
             E_T = torch.mean(Eng_T)
 
             noise.resize_(batch_size, nz, 1, 1).normal_()  # or Uniform
-            noiseV = Variable(noise)
-            samples = netG(noiseV)
-            disc_score_F = netE(samples.detach())
-            Eng_F = compute_energy(args, disc_score_F)
+            noise_var = Variable(noise)
+            samples = netG(noise_var)
+            disc_score_false = netE(samples.detach())
+            Eng_F = compute_energy(args, disc_score_false)
             E_F = torch.mean(Eng_F)
             errE = E_T - E_F
 
@@ -184,18 +184,19 @@ def train(device, args, output_dir, logger):
             netI.zero_grad()
 
             # part 1: reconstruction on train data (May get per-batch loss)
-            infer_z_mu_true, infer_z_log_sigma_true = netI(inputV)
+            infer_z_mu_true, infer_z_log_sigma_true = netI(input_var)
             z_input = reparametrize(infer_z_mu_true, infer_z_log_sigma_true)
-            inputV_recon = netG(z_input)
-            errRecon = mse_loss(inputV_recon, inputV) / batch_size
+            input_var_recon = netG(z_input)
+            err_recon = mse_loss(input_var_recon, input_var) / batch_size
+            # part 2: KLD
             errKld = -0.5 * torch.mean(
                 1 + infer_z_log_sigma_true - infer_z_mu_true.pow(2) - infer_z_log_sigma_true.exp())
 
             # part 3: reconstruction on latent z based on the generated data
             infer_z_mu_gen, infer_z_log_sigma_gen = netI(samples.detach())
-            errLatent = 0.1 * torch.mean(diag_normal_NLL(noiseV, infer_z_mu_gen, infer_z_log_sigma_gen))
+            err_latent = 0.1 * torch.mean(diag_normal_neg_log_prb(noise_var, infer_z_mu_gen, infer_z_log_sigma_gen))
 
-            errI = args.vfactor * (errRecon + errKld) + errLatent
+            errI = args.vfactor * (err_recon + errKld) + err_latent
             errI.backward()
             if args.is_grad_clampI:
                 torch.nn.utils.clip_grad_norm_(netI.parameters(), args.max_normI)
@@ -211,46 +212,45 @@ def train(device, args, output_dir, logger):
             """
             netG.zero_grad()
             # part 1: reconstruct the train data
-            infer_z_mu_true, infer_z_log_sigma_true = netI(inputV)
+            infer_z_mu_true, infer_z_log_sigma_true = netI(input_var)
             z_input = reparametrize(infer_z_mu_true, infer_z_log_sigma_true)
-            inputV_recon = netG(z_input)
-            errRecon = mse_loss(inputV_recon, inputV) / batch_size
+            input_var_recon = netG(z_input)
+            err_recon = mse_loss(input_var_recon, input_var) / batch_size
 
             # part2: (b): fool discriminator
-            disc_score_F = netE(samples)
-            Eng_F = compute_energy(args, disc_score_F)
+            disc_score_false = netE(samples)
+            Eng_F = compute_energy(args, disc_score_false)
             E_F = torch.mean(Eng_F)
 
             # part2: (a) : reconstruct the latent space
             infer_z_mu_gen, infer_z_log_sigma_gen = netI(samples)
-            errLatent = 0.1 * torch.mean(diag_normal_NLL(noiseV, infer_z_mu_gen, infer_z_log_sigma_gen))
+            err_latent = 0.1 * torch.mean(diag_normal_neg_log_prb(noise_var, infer_z_mu_gen, infer_z_log_sigma_gen))
 
-            errG = args.vfactor * errRecon + E_F + errLatent
+            errG = args.vfactor * err_recon + E_F + err_latent
             errG.backward()
             if args.is_grad_clampG:
                 torch.nn.utils.clip_grad_norm_(netG.parameters(), args.max_normG)
             optimizerG.step()
 
-        update_status(errRecon, errLatent, E_T, E_F, errI, errG, errE, errKld, num_batch)
+        update_status(err_recon, err_latent, E_T, E_F, errI, errG, errE, errKld, num_batch)
 
         # images
         if epoch % 10 == 0 or epoch == (args.niter - 1):
-            gen_samples = netG(fixed_noiseV)
+            gen_samples = netG(fixed_noise_var)
             vutils.save_image(gen_samples.data, '%s/epoch_%03d_samples.png' % (outf_syn, epoch), normalize=True,
                               nrow=10)
-
-            infer_z_mu_input, _ = netI(inputV)
-            recon_input = netG(infer_z_mu_input)
-            vutils.save_image(recon_input.data, '%s/epoch_%03d_reconstruct_input.png' % (outf_recon, epoch),
-                              normalize=True, nrow=10)
-
             infer_z_mu_sample, _ = netI(gen_samples)
             recon_sample = netG(infer_z_mu_sample)
             vutils.save_image(recon_sample.data, '%s/epoch_%03d_reconstruct_samples.png' % (outf_syn, epoch),
                               normalize=True, nrow=10)
 
+            infer_z_mu_input, _ = netI(input_var)
+            recon_input = netG(infer_z_mu_input)
+            vutils.save_image(recon_input.data, '%s/epoch_%03d_reconstruct_input.png' % (outf_recon, epoch),
+                              normalize=True, nrow=10)
+
             # interpolation
-            between_input_list = [inputV[0].data.cpu().numpy()[np.newaxis, ...]]
+            between_input_list = [input_var[0].data.cpu().numpy()[np.newaxis, ...]]
             zfrom = infer_z_mu_input[0].data.cpu()
             zto = infer_z_mu_input[1].data.cpu()
             fromto = zto - zfrom
@@ -258,7 +258,7 @@ def train(device, args, output_dir, logger):
                 between_z = zfrom + alpha * fromto
                 recon_between = netG(Variable(between_z.unsqueeze(0).to(device)))
                 between_input_list.append(recon_between.data.cpu().numpy())
-            between_input_list.append(inputV[1].data.cpu().numpy()[np.newaxis, ...])
+            between_input_list.append(input_var[1].data.cpu().numpy()[np.newaxis, ...])
             between_canvas_np = np.concatenate(between_input_list, axis=0)
             vutils.save_image(torch.from_numpy(between_canvas_np), '%s/epoch_%03d_interpolate.png' % (outf_syn, epoch),
                               normalize=True, nrow=10, padding=5)

@@ -65,8 +65,8 @@ def compute_energy(args, disc_score):
     return energy
 
 
-def diag_normal_NLL(z, z_mu, z_log_sigma):
-    # define the Negative Log Probability of Normal which has diagonal cov
+def diag_normal_neg_log_prb(z, z_mu, z_log_sigma):
+    # define the Negative Log Probability of Normal which has diagonal covariance
     # input: [batch nz, 1, 1] squeeze it to batch nz
     # return: shape is [batch]
     nll = 0.5 * torch.sum(z_log_sigma.squeeze(), dim=1) + \
